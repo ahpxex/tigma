@@ -409,12 +409,12 @@ class CanvasApp {
         this.hasDragged = false
         this.clickedOnSelectedTextBox = false
         
-        // First check if clicking on a hovered rectangle's resize handle
-        if (this.hoveredRectId !== null) {
-          const handle = this.getResizeHandleAt(this.hoveredRectId, event.x, event.y)
+        // First check if clicking on a SELECTED rectangle's resize handle (takes priority over everything)
+        if (this.selectedRectId !== null) {
+          const handle = this.getResizeHandleAt(this.selectedRectId, event.x, event.y)
           if (handle) {
             this.saveSnapshot()
-            this.draggingRectId = this.hoveredRectId
+            this.draggingRectId = this.selectedRectId
             this.isResizingRect = true
             this.resizeHandle = handle
             this.isDraggingMouse = true
@@ -557,6 +557,21 @@ class CanvasApp {
       this.hoveredRectId = null
       this.hoveredLineId = null
     } else {
+      // If hovering over a selected rectangle's resize handle, don't show hover on other objects
+      if (this.selectedRectId !== null) {
+        const handle = this.getResizeHandleAt(this.selectedRectId, x, y)
+        if (handle) {
+          this.hoveredTextBoxId = null
+          this.hoveredRectId = null
+          this.hoveredLineId = null
+          // Re-render if hover state changed
+          if (oldHoveredTextBox !== null || oldHoveredRect !== null || oldHoveredLine !== null) {
+            this.renderer.requestRender()
+          }
+          return
+        }
+      }
+
       // Find the object at this position with the highest zIndex
       const textBox = this.getTextBoxAt(x, y)
       const rect = this.getRectangleAt(x, y)
@@ -1115,22 +1130,23 @@ class CanvasApp {
     }
 
     // Draw selection highlights ON TOP of everything
+    // These read the current buffer content and only change the background color
     if (this.selectedTextBoxId !== null) {
       const selectedTextBox = this.textBoxes.find(b => b.id === this.selectedTextBoxId)
       if (selectedTextBox) {
-        this.renderTextBox(buffer, selectedTextBox, false, true)
+        this.renderSelectionHighlight(buffer, selectedTextBox.x, selectedTextBox.y, Math.max(1, selectedTextBox.chars.length), 1, this.selectedColor)
       }
     }
     if (this.selectedRectId !== null) {
       const selectedRect = this.rectangles.find(r => r.id === this.selectedRectId)
       if (selectedRect) {
-        this.renderRectangle(buffer, selectedRect, false, true)
+        this.renderRectangleSelectionHighlight(buffer, selectedRect)
       }
     }
     if (this.selectedLineId !== null) {
       const selectedLine = this.lines.find(l => l.id === this.selectedLineId)
       if (selectedLine) {
-        this.renderLine(buffer, selectedLine, false, true)
+        this.renderLineSelectionHighlight(buffer, selectedLine)
       }
     }
 
@@ -1331,6 +1347,90 @@ class CanvasApp {
         // Going down-left or up-right: use forward slash-like
         return "╱"
       }
+    }
+  }
+
+  // Read the current character at a buffer position
+  private readBufferChar(buffer: OptimizedBuffer, x: number, y: number): string {
+    const buffers = buffer.buffers
+    const index = y * buffer.width + x
+    const charCode = buffers.char[index]
+    if (!charCode || charCode === 0) return " "
+    return String.fromCodePoint(charCode)
+  }
+
+  // Read the current foreground color at a buffer position
+  private readBufferFg(buffer: OptimizedBuffer, x: number, y: number): RGBA {
+    const buffers = buffer.buffers
+    const index = (y * buffer.width + x) * 4
+    return RGBA.fromValues(
+      buffers.fg[index]!,
+      buffers.fg[index + 1]!,
+      buffers.fg[index + 2]!,
+      buffers.fg[index + 3]!
+    )
+  }
+
+  // Read the current attributes at a buffer position
+  private readBufferAttrs(buffer: OptimizedBuffer, x: number, y: number): number {
+    const buffers = buffer.buffers
+    const index = y * buffer.width + x
+    return buffers.attributes[index] ?? 0
+  }
+
+  // Render selection highlight by reading current buffer content and changing background
+  private renderSelectionHighlight(buffer: OptimizedBuffer, startX: number, startY: number, width: number, height: number, bg: RGBA): void {
+    for (let dy = 0; dy < height; dy++) {
+      for (let dx = 0; dx < width; dx++) {
+        const x = startX + dx
+        const y = startY + dy
+        if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
+        
+        const char = this.readBufferChar(buffer, x, y)
+        const fg = this.readBufferFg(buffer, x, y)
+        const attrs = this.readBufferAttrs(buffer, x, y)
+        buffer.setCell(x, y, char, fg, bg, attrs)
+      }
+    }
+  }
+
+  private renderRectangleSelectionHighlight(buffer: OptimizedBuffer, rect: Rectangle): void {
+    const { x1, y1, x2, y2 } = this.normalizeRect(rect)
+    const midX = Math.floor((x1 + x2) / 2)
+    const midY = Math.floor((y1 + y2) / 2)
+
+    for (let y = y1; y <= y2; y++) {
+      for (let x = x1; x <= x2; x++) {
+        if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
+
+        // Only highlight cells that are part of the rectangle border
+        const isOnBorder = (y === y1 || y === y2 || x === x1 || x === x2)
+        if (!isOnBorder) continue
+
+        const isCorner = (x === x1 && y === y1) || (x === x2 && y === y1) ||
+                         (x === x1 && y === y2) || (x === x2 && y === y2)
+        const isEdgeHandle = (x === midX && y === y1) || (x === midX && y === y2) ||
+                             (x === x1 && y === midY) || (x === x2 && y === midY)
+        const bg = (isCorner || isEdgeHandle) ? this.handleColor : this.selectedColor
+
+        const char = this.readBufferChar(buffer, x, y)
+        const fg = this.readBufferFg(buffer, x, y)
+        const attrs = this.readBufferAttrs(buffer, x, y)
+        buffer.setCell(x, y, char, fg, bg, attrs)
+      }
+    }
+  }
+
+  private renderLineSelectionHighlight(buffer: OptimizedBuffer, line: Line): void {
+    const points = this.getLinePoints(line.x1, line.y1, line.x2, line.y2)
+    
+    for (const { x, y } of points) {
+      if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
+
+      const char = this.readBufferChar(buffer, x, y)
+      const fg = this.readBufferFg(buffer, x, y)
+      const attrs = this.readBufferAttrs(buffer, x, y)
+      buffer.setCell(x, y, char, fg, this.selectedColor, attrs)
     }
   }
 
