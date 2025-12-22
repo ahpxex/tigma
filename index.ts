@@ -9,9 +9,13 @@ import {
   BoxRenderable,
 } from "@opentui/core"
 
+// Color can be null for transparent
+type EntityColor = RGBA | null
+
 interface TextChar {
   char: string
   bold: boolean
+  color: EntityColor  // text color (stroke)
 }
 
 interface TextBox {
@@ -20,6 +24,8 @@ interface TextBox {
   y: number
   chars: TextChar[]
   zIndex: number
+  strokeColor: EntityColor
+  fillColor: EntityColor
 }
 
 interface Rectangle {
@@ -30,6 +36,8 @@ interface Rectangle {
   y2: number
   bold: boolean
   zIndex: number
+  strokeColor: EntityColor
+  fillColor: EntityColor
 }
 
 interface Line {
@@ -40,7 +48,31 @@ interface Line {
   y2: number
   bold: boolean
   zIndex: number
+  strokeColor: EntityColor
+  fillColor: EntityColor  // not used for lines, but keeping consistent
 }
+
+// Color palette for strokes (bright colors)
+const STROKE_PALETTE: (RGBA | null)[] = [
+  null, // transparent
+  RGBA.fromInts(0, 0, 0, 255),       // black
+  RGBA.fromInts(255, 255, 255, 255), // white
+  RGBA.fromInts(255, 100, 100, 255), // red
+  RGBA.fromInts(100, 255, 100, 255), // green
+  RGBA.fromInts(100, 100, 255, 255), // blue
+  RGBA.fromInts(255, 255, 100, 255), // yellow
+]
+
+// Color palette for fills (Tailwind 700-800 level colors - good for backgrounds)
+const FILL_PALETTE: (RGBA | null)[] = [
+  null, // transparent
+  RGBA.fromInts(0, 0, 0, 255),       // black
+  RGBA.fromInts(63, 63, 70, 255),    // zinc-700
+  RGBA.fromInts(127, 29, 29, 255),   // red-900 (more muted)
+  RGBA.fromInts(21, 128, 61, 255),   // green-700
+  RGBA.fromInts(29, 78, 216, 255),   // blue-700
+  RGBA.fromInts(161, 98, 7, 255),    // yellow-700
+]
 
 type Tool = "move" | "text" | "rectangle" | "line"
 
@@ -114,14 +146,15 @@ class CanvasApp {
   private hoveredLineId: number | null = null
 
   // Selection state (persists after clicking/dragging)
-  private selectedTextBoxId: number | null = null
-  private selectedRectId: number | null = null
-  private selectedLineId: number | null = null
+  // Using Sets to support multi-selection
+  private selectedTextBoxIds: Set<number> = new Set()
+  private selectedRectIds: Set<number> = new Set()
+  private selectedLineIds: Set<number> = new Set()
 
   // Dragging state (for moving objects)
-  private draggingTextBoxId: number | null = null
-  private draggingRectId: number | null = null
-  private draggingLineId: number | null = null
+  private isDraggingSelection = false
+  private dragStartX = 0
+  private dragStartY = 0
   private isResizingRect = false
   private resizeHandle: ResizeHandle = null
   private moveOffsetX = 0
@@ -136,17 +169,24 @@ class CanvasApp {
   private redoStack: HistorySnapshot[] = []
   private readonly MAX_HISTORY = 100
 
+  // Current stroke and fill colors for new entities
+  private currentStrokeColor: EntityColor = RGBA.fromInts(255, 255, 255, 255) // white
+  private currentFillColor: EntityColor = null // transparent
+  private currentStrokeColorIndex = 2 // index in STROKE_PALETTE (white)
+  private currentFillColorIndex = 0 // index in FILL_PALETTE (0 = transparent)
+  private colorPickerMode: "stroke" | "fill" = "stroke"
+
   private readonly textColor = RGBA.fromInts(255, 255, 255, 255)
-  private readonly boldColor = RGBA.fromInts(255, 255, 100, 255)
   private readonly bgColor = RGBA.fromInts(0, 0, 0, 255)
   private readonly cursorBgColor = RGBA.fromInts(80, 80, 80, 255)
   private readonly toolbarBgColor = RGBA.fromInts(30, 30, 30, 255)
   private readonly toolbarTextColor = RGBA.fromInts(200, 200, 200, 255)
   private readonly toolbarActiveColor = RGBA.fromInts(100, 150, 255, 255)
-  private readonly rectPreviewColor = RGBA.fromInts(100, 100, 255, 255)
-  private readonly hoverColor = RGBA.fromInts(60, 60, 80, 255)
-  private readonly selectedColor = RGBA.fromInts(255, 180, 80, 255)
-  private readonly handleColor = RGBA.fromInts(255, 100, 100, 255)
+
+  private readonly hoverColor = RGBA.fromInts(35, 40, 60, 255)
+  // Selection uses a subtle muted blue
+  private readonly selectedBgColor = RGBA.fromInts(25, 40, 80, 255)  // muted blue tint
+  private readonly handleColor = RGBA.fromInts(50, 80, 160, 255)  // slightly brighter blue for handles
   private readonly textBoxBorderColor = RGBA.fromInts(100, 150, 255, 255)
 
   private readonly TOOLBAR_HEIGHT = 1
@@ -261,9 +301,7 @@ class CanvasApp {
     this.hoveredTextBoxId = null
     this.hoveredRectId = null
     this.hoveredLineId = null
-    this.selectedTextBoxId = null
-    this.selectedRectId = null
-    this.selectedLineId = null
+    this.clearSelection()
 
     this.renderer.requestRender()
   }
@@ -294,10 +332,94 @@ class CanvasApp {
     this.hoveredTextBoxId = null
     this.hoveredRectId = null
     this.hoveredLineId = null
-    this.selectedTextBoxId = null
-    this.selectedRectId = null
-    this.selectedLineId = null
+    this.clearSelection()
 
+    this.renderer.requestRender()
+  }
+
+  // ==================== Selection Helpers ====================
+
+  private clearSelection(): void {
+    this.selectedTextBoxIds.clear()
+    this.selectedRectIds.clear()
+    this.selectedLineIds.clear()
+  }
+
+  private hasSelection(): boolean {
+    return this.selectedTextBoxIds.size > 0 || this.selectedRectIds.size > 0 || this.selectedLineIds.size > 0
+  }
+
+  private isMultiSelection(): boolean {
+    const total = this.selectedTextBoxIds.size + this.selectedRectIds.size + this.selectedLineIds.size
+    return total > 1
+  }
+
+  private getTotalSelectionCount(): number {
+    return this.selectedTextBoxIds.size + this.selectedRectIds.size + this.selectedLineIds.size
+  }
+
+  private isTextBoxSelected(id: number): boolean {
+    return this.selectedTextBoxIds.has(id)
+  }
+
+  private isRectSelected(id: number): boolean {
+    return this.selectedRectIds.has(id)
+  }
+
+  private isLineSelected(id: number): boolean {
+    return this.selectedLineIds.has(id)
+  }
+
+  private selectTextBox(id: number, addToSelection: boolean): void {
+    if (!addToSelection) {
+      this.clearSelection()
+    }
+    this.selectedTextBoxIds.add(id)
+  }
+
+  private selectRect(id: number, addToSelection: boolean): void {
+    if (!addToSelection) {
+      this.clearSelection()
+    }
+    this.selectedRectIds.add(id)
+  }
+
+  private selectLine(id: number, addToSelection: boolean): void {
+    if (!addToSelection) {
+      this.clearSelection()
+    }
+    this.selectedLineIds.add(id)
+  }
+
+  private moveSelection(dx: number, dy: number): void {
+    // Move all selected text boxes
+    for (const id of this.selectedTextBoxIds) {
+      const box = this.textBoxes.find(b => b.id === id)
+      if (box) {
+        box.x += dx
+        box.y += dy
+      }
+    }
+    // Move all selected rectangles
+    for (const id of this.selectedRectIds) {
+      const rect = this.rectangles.find(r => r.id === id)
+      if (rect) {
+        rect.x1 += dx
+        rect.y1 += dy
+        rect.x2 += dx
+        rect.y2 += dy
+      }
+    }
+    // Move all selected lines
+    for (const id of this.selectedLineIds) {
+      const line = this.lines.find(l => l.id === id)
+      if (line) {
+        line.x1 += dx
+        line.y1 += dy
+        line.x2 += dx
+        line.y2 += dy
+      }
+    }
     this.renderer.requestRender()
   }
 
@@ -306,6 +428,14 @@ class CanvasApp {
   private handleMouse(event: MouseEvent): void {
     if (event.y >= this.gridHeight) {
       return
+    }
+
+    // Check for color picker clicks first
+    if (event.type === "down") {
+      const colorPickerResult = this.handleColorPickerClick(event.x, event.y)
+      if (colorPickerResult) {
+        return
+      }
     }
 
     // Handle hover for all tools
@@ -321,16 +451,19 @@ class CanvasApp {
         this.hasDragged = true
       }
       
-      if (this.draggingTextBoxId !== null) {
-        this.moveTextBox(this.draggingTextBoxId, event.x - this.moveOffsetX, event.y - this.moveOffsetY)
-      } else if (this.draggingRectId !== null) {
-        if (this.isResizingRect) {
-          this.resizeRect(this.draggingRectId, event.x, event.y)
-        } else {
-          this.moveRect(this.draggingRectId, event.x - this.moveOffsetX, event.y - this.moveOffsetY)
+      if (this.isDraggingSelection) {
+        // Move all selected items
+        const dx = event.x - this.dragStartX
+        const dy = event.y - this.dragStartY
+        this.moveSelection(dx, dy)
+        this.dragStartX = event.x
+        this.dragStartY = event.y
+      } else if (this.isResizingRect) {
+        // Find the single selected rect for resizing
+        const rectId = this.selectedRectIds.values().next().value
+        if (rectId !== undefined) {
+          this.resizeRect(rectId, event.x, event.y)
         }
-      } else if (this.draggingLineId !== null) {
-        this.moveLine(this.draggingLineId, event.x - this.moveOffsetX, event.y - this.moveOffsetY)
       } else if (this.isDrawingRect || this.isDrawingLine) {
         this.drawCursorX = Math.max(0, Math.min(this.gridWidth - 1, event.x))
         this.drawCursorY = Math.max(0, Math.min(this.gridHeight - 1, event.y))
@@ -352,22 +485,21 @@ class CanvasApp {
         this.commitLine()
       }
       
-      // If we clicked on a selected text box and didn't drag, enter edit mode
-      if (this.clickedOnSelectedTextBox && !this.hasDragged && this.selectedTextBoxId !== null) {
-        const textBox = this.textBoxes.find(b => b.id === this.selectedTextBoxId)
+      // If we clicked on a selected text box and didn't drag, enter edit mode (only for single selection)
+      if (this.clickedOnSelectedTextBox && !this.hasDragged && this.selectedTextBoxIds.size === 1) {
+        const textBoxId = this.selectedTextBoxIds.values().next().value
+        const textBox = this.textBoxes.find(b => b.id === textBoxId)
         if (textBox) {
           this.activeTextBoxId = textBox.id
           const relativeX = event.x - textBox.x
           this.textCursorPos = Math.min(relativeX, this.getTextLength(textBox))
-          this.selectedTextBoxId = null
+          this.clearSelection()
           this.resetCursorBlink()
           this.renderer.requestRender()
         }
       }
       
-      this.draggingTextBoxId = null
-      this.draggingRectId = null
-      this.draggingLineId = null
+      this.isDraggingSelection = false
       this.isResizingRect = false
       this.resizeHandle = null
       this.isDraggingMouse = false
@@ -409,46 +541,51 @@ class CanvasApp {
         this.hasDragged = false
         this.clickedOnSelectedTextBox = false
         
-        // First check if clicking on a SELECTED rectangle's resize handle (takes priority over everything)
-        if (this.selectedRectId !== null) {
-          const handle = this.getResizeHandleAt(this.selectedRectId, event.x, event.y)
-          if (handle) {
-            this.saveSnapshot()
-            this.draggingRectId = this.selectedRectId
-            this.isResizingRect = true
-            this.resizeHandle = handle
-            this.isDraggingMouse = true
-            return
+        const shiftHeld = event.modifiers?.shift ?? false
+        
+        // First check if clicking on a SELECTED rectangle's resize handle (only for single selection)
+        if (this.selectedRectIds.size === 1 && !this.isMultiSelection()) {
+          const rectId = this.selectedRectIds.values().next().value
+          if (rectId !== undefined) {
+            const handle = this.getResizeHandleAt(rectId, event.x, event.y)
+            if (handle) {
+              this.saveSnapshot()
+              this.isResizingRect = true
+              this.resizeHandle = handle
+              this.isDraggingMouse = true
+              return
+            }
           }
         }
 
         // Check if clicking on a text box
         const clickedTextBox = this.getTextBoxAt(event.x, event.y)
         if (clickedTextBox) {
-          // If already selected, prepare for potential edit mode (on mouse up if no drag)
-          if (this.selectedTextBoxId === clickedTextBox.id) {
+          const alreadySelected = this.isTextBoxSelected(clickedTextBox.id)
+          
+          if (alreadySelected && !shiftHeld && !this.isMultiSelection()) {
+            // Single selected text box clicked again - prepare for edit mode
             this.clickedOnSelectedTextBox = true
-            // Still prepare for dragging
-            this.draggingTextBoxId = clickedTextBox.id
-            this.moveOffsetX = event.x - clickedTextBox.x
-            this.moveOffsetY = event.y - clickedTextBox.y
-            this.isDraggingMouse = true
-            this.saveSnapshot()
-            this.renderer.requestRender()
-            return
           }
           
-          // Select this text box
-          this.selectedTextBoxId = clickedTextBox.id
-          this.selectedRectId = null
-          this.selectedLineId = null
+          if (shiftHeld) {
+            // Toggle selection
+            if (alreadySelected) {
+              this.selectedTextBoxIds.delete(clickedTextBox.id)
+            } else {
+              this.selectedTextBoxIds.add(clickedTextBox.id)
+            }
+          } else if (!alreadySelected) {
+            // Regular click on unselected - select only this
+            this.selectTextBox(clickedTextBox.id, false)
+          }
           
-          // Prepare for dragging
-          this.draggingTextBoxId = clickedTextBox.id
-          this.moveOffsetX = event.x - clickedTextBox.x
-          this.moveOffsetY = event.y - clickedTextBox.y
-          this.isDraggingMouse = true
+          // Prepare for dragging all selected items
           this.saveSnapshot()
+          this.isDraggingSelection = true
+          this.dragStartX = event.x
+          this.dragStartY = event.y
+          this.isDraggingMouse = true
           this.renderer.requestRender()
           return
         }
@@ -456,15 +593,25 @@ class CanvasApp {
         // Check if clicking on a rectangle
         const clickedRect = this.getRectangleAt(event.x, event.y)
         if (clickedRect) {
+          const alreadySelected = this.isRectSelected(clickedRect.id)
+          
+          if (shiftHeld) {
+            // Toggle selection
+            if (alreadySelected) {
+              this.selectedRectIds.delete(clickedRect.id)
+            } else {
+              this.selectedRectIds.add(clickedRect.id)
+            }
+          } else if (!alreadySelected) {
+            // Regular click on unselected - select only this
+            this.selectRect(clickedRect.id, false)
+          }
+          
+          // Prepare for dragging all selected items
           this.saveSnapshot()
-          // Select this rectangle
-          this.selectedTextBoxId = null
-          this.selectedRectId = clickedRect.id
-          this.selectedLineId = null
-          const normalized = this.normalizeRect(clickedRect)
-          this.draggingRectId = clickedRect.id
-          this.moveOffsetX = event.x - normalized.x1
-          this.moveOffsetY = event.y - normalized.y1
+          this.isDraggingSelection = true
+          this.dragStartX = event.x
+          this.dragStartY = event.y
           this.isDraggingMouse = true
           this.renderer.requestRender()
           return
@@ -473,32 +620,41 @@ class CanvasApp {
         // Check if clicking on a line
         const clickedLine = this.getLineAt(event.x, event.y)
         if (clickedLine) {
+          const alreadySelected = this.isLineSelected(clickedLine.id)
+          
+          if (shiftHeld) {
+            // Toggle selection
+            if (alreadySelected) {
+              this.selectedLineIds.delete(clickedLine.id)
+            } else {
+              this.selectedLineIds.add(clickedLine.id)
+            }
+          } else if (!alreadySelected) {
+            // Regular click on unselected - select only this
+            this.selectLine(clickedLine.id, false)
+          }
+          
+          // Prepare for dragging all selected items
           this.saveSnapshot()
-          // Select this line
-          this.selectedTextBoxId = null
-          this.selectedRectId = null
-          this.selectedLineId = clickedLine.id
-          const normalized = this.normalizeLine(clickedLine)
-          this.draggingLineId = clickedLine.id
-          this.moveOffsetX = event.x - normalized.x1
-          this.moveOffsetY = event.y - normalized.y1
+          this.isDraggingSelection = true
+          this.dragStartX = event.x
+          this.dragStartY = event.y
           this.isDraggingMouse = true
           this.renderer.requestRender()
           return
         }
 
-        // Clicking on empty space - clear selection
-        this.selectedTextBoxId = null
-        this.selectedRectId = null
-        this.selectedLineId = null
+        // Clicking on empty space - clear selection (unless shift is held)
+        if (!shiftHeld) {
+          this.clearSelection()
+        }
         this.renderer.requestRender()
         return
       }
 
       // Drawing tools: create new objects (ignore existing objects)
       // Clear selection when using drawing tools
-      this.selectedRectId = null
-      this.selectedLineId = null
+      this.clearSelection()
 
       if (this.currentTool === "text") {
         // Check if clicking on an existing text box to edit it
@@ -518,6 +674,8 @@ class CanvasApp {
             y: event.y,
             chars: [],
             zIndex: this.nextZIndex++,
+            strokeColor: this.currentStrokeColor,
+            fillColor: this.currentFillColor,
           }
           this.textBoxes.push(newBox)
           this.activeTextBoxId = newBox.id
@@ -557,18 +715,22 @@ class CanvasApp {
       this.hoveredRectId = null
       this.hoveredLineId = null
     } else {
-      // If hovering over a selected rectangle's resize handle, don't show hover on other objects
-      if (this.selectedRectId !== null) {
-        const handle = this.getResizeHandleAt(this.selectedRectId, x, y)
-        if (handle) {
-          this.hoveredTextBoxId = null
-          this.hoveredRectId = null
-          this.hoveredLineId = null
-          // Re-render if hover state changed
-          if (oldHoveredTextBox !== null || oldHoveredRect !== null || oldHoveredLine !== null) {
-            this.renderer.requestRender()
+      // If hovering over a selected rectangle's resize handle (single selection only), 
+      // keep that rect as hovered but don't show hover on other objects
+      if (this.selectedRectIds.size === 1 && !this.isMultiSelection()) {
+        const rectId = this.selectedRectIds.values().next().value
+        if (rectId !== undefined) {
+          const handle = this.getResizeHandleAt(rectId, x, y)
+          if (handle) {
+            this.hoveredTextBoxId = null
+            this.hoveredRectId = rectId  // Keep the rect hovered so handles show
+            this.hoveredLineId = null
+            // Re-render if hover state changed
+            if (oldHoveredTextBox !== null || oldHoveredRect !== rectId || oldHoveredLine !== null) {
+              this.renderer.requestRender()
+            }
+            return
           }
-          return
         }
       }
 
@@ -765,11 +927,12 @@ class CanvasApp {
         x1, y1, x2, y2,
         bold: this.boldMode,
         zIndex: this.nextZIndex++,
+        strokeColor: this.currentStrokeColor,
+        fillColor: this.currentFillColor,
       }
       this.rectangles.push(rect)
       // Select the newly created rectangle
-      this.selectedRectId = rect.id
-      this.selectedLineId = null
+      this.selectRect(rect.id, false)
     }
 
     this.isDrawingRect = false
@@ -892,11 +1055,12 @@ class CanvasApp {
         x1, y1, x2, y2,
         bold: this.boldMode,
         zIndex: this.nextZIndex++,
+        strokeColor: this.currentStrokeColor,
+        fillColor: null,  // Lines don't use fill
       }
       this.lines.push(line)
       // Select the newly created line
-      this.selectedLineId = line.id
-      this.selectedRectId = null
+      this.selectLine(line.id, false)
     }
 
     this.isDrawingLine = false
@@ -915,18 +1079,22 @@ class CanvasApp {
 
   // ==================== Layer Management ====================
 
-  private getSelectedObject(): { type: "text" | "rect" | "line"; zIndex: number } | null {
-    if (this.selectedTextBoxId !== null) {
-      const box = this.textBoxes.find(b => b.id === this.selectedTextBoxId)
-      if (box) return { type: "text", zIndex: box.zIndex }
+  private getSelectedObject(): { type: "text" | "rect" | "line"; zIndex: number; id: number } | null {
+    // Only return a single selected object (for layer reordering - only works with single selection)
+    if (this.selectedTextBoxIds.size === 1) {
+      const id = this.selectedTextBoxIds.values().next().value
+      const box = this.textBoxes.find(b => b.id === id)
+      if (box) return { type: "text", zIndex: box.zIndex, id: box.id }
     }
-    if (this.selectedRectId !== null) {
-      const rect = this.rectangles.find(r => r.id === this.selectedRectId)
-      if (rect) return { type: "rect", zIndex: rect.zIndex }
+    if (this.selectedRectIds.size === 1) {
+      const id = this.selectedRectIds.values().next().value
+      const rect = this.rectangles.find(r => r.id === id)
+      if (rect) return { type: "rect", zIndex: rect.zIndex, id: rect.id }
     }
-    if (this.selectedLineId !== null) {
-      const line = this.lines.find(l => l.id === this.selectedLineId)
-      if (line) return { type: "line", zIndex: line.zIndex }
+    if (this.selectedLineIds.size === 1) {
+      const id = this.selectedLineIds.values().next().value
+      const line = this.lines.find(l => l.id === id)
+      if (line) return { type: "line", zIndex: line.zIndex, id: line.id }
     }
     return null
   }
@@ -975,14 +1143,14 @@ class CanvasApp {
     }
     
     // Give the selected object the lower zIndex
-    if (this.selectedTextBoxId !== null) {
-      const box = this.textBoxes.find(b => b.id === this.selectedTextBoxId)
+    if (selected.type === "text") {
+      const box = this.textBoxes.find(b => b.id === selected.id)
       if (box) box.zIndex = lowerZ
-    } else if (this.selectedRectId !== null) {
-      const rect = this.rectangles.find(r => r.id === this.selectedRectId)
+    } else if (selected.type === "rect") {
+      const rect = this.rectangles.find(r => r.id === selected.id)
       if (rect) rect.zIndex = lowerZ
-    } else if (this.selectedLineId !== null) {
-      const line = this.lines.find(l => l.id === this.selectedLineId)
+    } else if (selected.type === "line") {
+      const line = this.lines.find(l => l.id === selected.id)
       if (line) line.zIndex = lowerZ
     }
     
@@ -1025,14 +1193,14 @@ class CanvasApp {
     }
     
     // Give the selected object the higher zIndex
-    if (this.selectedTextBoxId !== null) {
-      const box = this.textBoxes.find(b => b.id === this.selectedTextBoxId)
+    if (selected.type === "text") {
+      const box = this.textBoxes.find(b => b.id === selected.id)
       if (box) box.zIndex = higherZ
-    } else if (this.selectedRectId !== null) {
-      const rect = this.rectangles.find(r => r.id === this.selectedRectId)
+    } else if (selected.type === "rect") {
+      const rect = this.rectangles.find(r => r.id === selected.id)
       if (rect) rect.zIndex = higherZ
-    } else if (this.selectedLineId !== null) {
-      const line = this.lines.find(l => l.id === this.selectedLineId)
+    } else if (selected.type === "line") {
+      const line = this.lines.find(l => l.id === selected.id)
       if (line) line.zIndex = higherZ
     }
     
@@ -1061,9 +1229,7 @@ class CanvasApp {
       this.hoveredTextBoxId = null
       this.hoveredRectId = null
       this.hoveredLineId = null
-      this.selectedTextBoxId = null
-      this.selectedRectId = null
-      this.selectedLineId = null
+      this.clearSelection()
     }
     
     this.renderer.requestRender()
@@ -1100,14 +1266,16 @@ class CanvasApp {
     // Render all objects in zIndex order
     for (const item of items) {
       if (item.type === "text") {
-        const isHovered = item.obj.id === this.hoveredTextBoxId && item.obj.id !== this.activeTextBoxId && item.obj.id !== this.selectedTextBoxId
-        const isSelected = item.obj.id === this.selectedTextBoxId
+        const isSelected = this.isTextBoxSelected(item.obj.id)
+        const isHovered = item.obj.id === this.hoveredTextBoxId && item.obj.id !== this.activeTextBoxId && !isSelected
         this.renderTextBox(buffer, item.obj, isHovered, isSelected)
       } else if (item.type === "rect") {
-        const isHovered = item.obj.id === this.hoveredRectId && item.obj.id !== this.selectedRectId
+        const isSelected = this.isRectSelected(item.obj.id)
+        const isHovered = item.obj.id === this.hoveredRectId && !isSelected
         this.renderRectangle(buffer, item.obj, isHovered, false)
       } else if (item.type === "line") {
-        const isHovered = item.obj.id === this.hoveredLineId && item.obj.id !== this.selectedLineId
+        const isSelected = this.isLineSelected(item.obj.id)
+        const isHovered = item.obj.id === this.hoveredLineId && !isSelected
         this.renderLine(buffer, item.obj, isHovered, false)
       }
     }
@@ -1131,44 +1299,61 @@ class CanvasApp {
 
     // Draw selection highlights ON TOP of everything
     // These read the current buffer content and only change the background color
-    if (this.selectedTextBoxId !== null) {
-      const selectedTextBox = this.textBoxes.find(b => b.id === this.selectedTextBoxId)
+    for (const id of this.selectedTextBoxIds) {
+      const selectedTextBox = this.textBoxes.find(b => b.id === id)
       if (selectedTextBox) {
-        this.renderSelectionHighlight(buffer, selectedTextBox.x, selectedTextBox.y, Math.max(1, selectedTextBox.chars.length), 1, this.selectedColor)
+        // Render selection with 1-cell border around text
+        const textWidth = Math.max(1, selectedTextBox.chars.length)
+        this.renderSelectionHighlight(buffer, selectedTextBox.x - 1, selectedTextBox.y - 1, textWidth + 2, 3)
       }
     }
-    if (this.selectedRectId !== null) {
-      const selectedRect = this.rectangles.find(r => r.id === this.selectedRectId)
+    for (const id of this.selectedRectIds) {
+      const selectedRect = this.rectangles.find(r => r.id === id)
       if (selectedRect) {
-        this.renderRectangleSelectionHighlight(buffer, selectedRect)
+        // Only show resize handles when hovered and single selection
+        const isHovered = this.hoveredRectId === id
+        const showHandles = isHovered && !this.isMultiSelection()
+        this.renderRectangleSelectionHighlight(buffer, selectedRect, showHandles)
       }
     }
-    if (this.selectedLineId !== null) {
-      const selectedLine = this.lines.find(l => l.id === this.selectedLineId)
+    for (const id of this.selectedLineIds) {
+      const selectedLine = this.lines.find(l => l.id === id)
       if (selectedLine) {
         this.renderLineSelectionHighlight(buffer, selectedLine)
       }
     }
+
+    // Draw color picker (in bottom right, above toolbar)
+    this.renderColorPicker(buffer)
 
     // Draw toolbar
     this.renderToolbar(buffer)
   }
 
   private renderTextBox(buffer: OptimizedBuffer, box: TextBox, isHovered: boolean, isSelected: boolean = false): void {
-    let bg = this.bgColor
-    if (isSelected) {
-      bg = this.selectedColor
-    } else if (isHovered) {
-      bg = this.hoverColor
-    }
     const boxWidth = Math.max(1, box.chars.length)
 
     for (let i = 0; i < boxWidth; i++) {
       const x = box.x + i
       if (x >= 0 && x < this.gridWidth && box.y >= 0 && box.y < this.gridHeight) {
+        // Determine background: selection > hover > fill > existing buffer bg
+        let bg: RGBA
+        if (isSelected) {
+          bg = this.getSelectionBg(x, box.y)
+        } else if (isHovered) {
+          bg = this.hoverColor
+        } else if (box.fillColor !== null) {
+          bg = box.fillColor
+        } else {
+          // Transparent fill - use whatever is already in the buffer
+          bg = this.readBufferBg(buffer, x, box.y)
+        }
+        
         if (i < box.chars.length) {
           const charInfo = box.chars[i]!
-          const fg = charInfo.bold ? this.boldColor : this.textColor
+          // Use per-character color if set, otherwise fall back to box strokeColor, then default
+          const charColor = charInfo.color ?? box.strokeColor ?? this.textColor
+          const fg = charColor
           const attrs = charInfo.bold ? TextAttributes.BOLD : 0
           buffer.setCell(x, box.y, charInfo.char, fg, bg, attrs)
         } else if (isHovered || isSelected) {
@@ -1213,44 +1398,56 @@ class CanvasApp {
       const charInfo = this.textCursorPos < box.chars.length ? box.chars[this.textCursorPos]! : null
       const char = charInfo ? charInfo.char : " "
       const isBold = charInfo ? charInfo.bold : this.boldMode
-      const fg = isBold ? this.boldColor : this.textColor
+      const fg = this.textColor
       const attrs = isBold ? TextAttributes.BOLD : 0
       buffer.setCell(cursorX, box.y, char, fg, this.cursorBgColor, attrs)
     }
   }
 
-  private renderRectangle(buffer: OptimizedBuffer, rect: Rectangle, isHovered: boolean, isSelected: boolean): void {
+  private renderRectangle(buffer: OptimizedBuffer, rect: Rectangle, isHovered: boolean, _isSelected: boolean): void {
     const { x1, y1, x2, y2 } = this.normalizeRect(rect)
-    const fg = rect.bold ? this.boldColor : this.textColor
     const attrs = rect.bold ? TextAttributes.BOLD : 0
+    const hasStroke = rect.strokeColor !== null
 
-    const midX = Math.floor((x1 + x2) / 2)
-    const midY = Math.floor((y1 + y2) / 2)
+    // Render fill area (interior of rectangle, or full area if no stroke)
+    if (rect.fillColor) {
+      // If no stroke, fill the entire area; otherwise fill only interior
+      const fillX1 = hasStroke ? x1 + 1 : x1
+      const fillY1 = hasStroke ? y1 + 1 : y1
+      const fillX2 = hasStroke ? x2 - 1 : x2
+      const fillY2 = hasStroke ? y2 - 1 : y2
+      
+      for (let y = fillY1; y <= fillY2; y++) {
+        for (let x = fillX1; x <= fillX2; x++) {
+          if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
+          buffer.setCell(x, y, " ", this.textColor, rect.fillColor, 0)
+        }
+      }
+    }
 
-    for (let y = y1; y <= y2; y++) {
-      for (let x = x1; x <= x2; x++) {
-        if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
+    // Render border only if stroke color is not transparent
+    if (hasStroke) {
+      const strokeColor = rect.strokeColor!
+      
+      for (let y = y1; y <= y2; y++) {
+        for (let x = x1; x <= x2; x++) {
+          if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
 
-        let char = ""
-        if (y === y1 && x === x1) char = "┌"
-        else if (y === y1 && x === x2) char = "┐"
-        else if (y === y2 && x === x1) char = "└"
-        else if (y === y2 && x === x2) char = "┘"
-        else if (y === y1 || y === y2) char = "─"
-        else if (x === x1 || x === x2) char = "│"
+          let char = ""
+          if (y === y1 && x === x1) char = "┌"
+          else if (y === y1 && x === x2) char = "┐"
+          else if (y === y2 && x === x1) char = "└"
+          else if (y === y2 && x === x2) char = "┘"
+          else if (y === y1 || y === y2) char = "─"
+          else if (x === x1 || x === x2) char = "│"
 
-        if (char) {
-          let bg = this.bgColor
-          if (isSelected) {
-            const isCorner = (x === x1 && y === y1) || (x === x2 && y === y1) ||
-                             (x === x1 && y === y2) || (x === x2 && y === y2)
-            const isEdgeHandle = (x === midX && y === y1) || (x === midX && y === y2) ||
-                                 (x === x1 && y === midY) || (x === x2 && y === midY)
-            bg = (isCorner || isEdgeHandle) ? this.handleColor : this.selectedColor
-          } else if (isHovered) {
-            bg = this.hoverColor
+          if (char) {
+            let bg = this.bgColor
+            if (isHovered) {
+              bg = this.hoverColor
+            }
+            buffer.setCell(x, y, char, strokeColor, bg, attrs)
           }
-          buffer.setCell(x, y, char, fg, bg, attrs)
         }
       }
     }
@@ -1262,7 +1459,7 @@ class CanvasApp {
     const y1 = Math.min(this.drawStartY, this.drawCursorY)
     const y2 = Math.max(this.drawStartY, this.drawCursorY)
 
-    const fg = this.boldMode ? this.boldColor : this.textColor
+    const fg = this.currentStrokeColor ?? this.textColor
     const attrs = this.boldMode ? TextAttributes.BOLD : 0
 
     for (let y = y1; y <= y2; y++) {
@@ -1278,18 +1475,18 @@ class CanvasApp {
         else if (x === x1 || x === x2) char = "│"
 
         if (char) {
-          buffer.setCell(x, y, char, fg, this.rectPreviewColor, attrs)
+          buffer.setCell(x, y, char, fg, this.bgColor, attrs)
         }
       }
     }
   }
 
-  private renderLine(buffer: OptimizedBuffer, line: Line, isHovered: boolean, isSelected: boolean): void {
-    const fg = line.bold ? this.boldColor : this.textColor
+  private renderLine(buffer: OptimizedBuffer, line: Line, isHovered: boolean, _isSelected: boolean): void {
+    // Use strokeColor for the line, fall back to text color
+    // Selection highlighting is done separately via renderLineSelectionHighlight
+    const strokeColor = line.strokeColor ?? this.textColor
     let bg = this.bgColor
-    if (isSelected) {
-      bg = this.selectedColor
-    } else if (isHovered) {
+    if (isHovered) {
       bg = this.hoverColor
     }
     const attrs = line.bold ? TextAttributes.BOLD : 0
@@ -1301,12 +1498,12 @@ class CanvasApp {
       if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
 
       const char = this.getLineChar(line.x1, line.y1, line.x2, line.y2, i, points.length)
-      buffer.setCell(x, y, char, fg, bg, attrs)
+      buffer.setCell(x, y, char, strokeColor, bg, attrs)
     }
   }
 
   private renderLinePreview(buffer: OptimizedBuffer): void {
-    const fg = this.boldMode ? this.boldColor : this.textColor
+    const fg = this.currentStrokeColor ?? this.textColor
     const attrs = this.boldMode ? TextAttributes.BOLD : 0
 
     const points = this.getLinePoints(this.drawStartX, this.drawStartY, this.drawCursorX, this.drawCursorY)
@@ -1316,7 +1513,7 @@ class CanvasApp {
       if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
 
       const char = this.getLineChar(this.drawStartX, this.drawStartY, this.drawCursorX, this.drawCursorY, i, points.length)
-      buffer.setCell(x, y, char, fg, this.rectPreviewColor, attrs)
+      buffer.setCell(x, y, char, fg, this.bgColor, attrs)
     }
   }
 
@@ -1371,6 +1568,18 @@ class CanvasApp {
     )
   }
 
+  // Read the current background color at a buffer position
+  private readBufferBg(buffer: OptimizedBuffer, x: number, y: number): RGBA {
+    const buffers = buffer.buffers
+    const index = (y * buffer.width + x) * 4
+    return RGBA.fromValues(
+      buffers.bg[index]!,
+      buffers.bg[index + 1]!,
+      buffers.bg[index + 2]!,
+      buffers.bg[index + 3]!
+    )
+  }
+
   // Read the current attributes at a buffer position
   private readBufferAttrs(buffer: OptimizedBuffer, x: number, y: number): number {
     const buffers = buffer.buffers
@@ -1379,7 +1588,12 @@ class CanvasApp {
   }
 
   // Render selection highlight by reading current buffer content and changing background
-  private renderSelectionHighlight(buffer: OptimizedBuffer, startX: number, startY: number, width: number, height: number, bg: RGBA): void {
+  private getSelectionBg(_x: number, _y: number): RGBA {
+    // Subtle muted blue for selection highlight
+    return this.selectedBgColor
+  }
+
+  private renderSelectionHighlight(buffer: OptimizedBuffer, startX: number, startY: number, width: number, height: number): void {
     for (let dy = 0; dy < height; dy++) {
       for (let dx = 0; dx < width; dx++) {
         const x = startX + dx
@@ -1389,12 +1603,13 @@ class CanvasApp {
         const char = this.readBufferChar(buffer, x, y)
         const fg = this.readBufferFg(buffer, x, y)
         const attrs = this.readBufferAttrs(buffer, x, y)
+        const bg = this.getSelectionBg(x, y)
         buffer.setCell(x, y, char, fg, bg, attrs)
       }
     }
   }
 
-  private renderRectangleSelectionHighlight(buffer: OptimizedBuffer, rect: Rectangle): void {
+  private renderRectangleSelectionHighlight(buffer: OptimizedBuffer, rect: Rectangle, showHandles: boolean = true): void {
     const { x1, y1, x2, y2 } = this.normalizeRect(rect)
     const midX = Math.floor((x1 + x2) / 2)
     const midY = Math.floor((y1 + y2) / 2)
@@ -1407,11 +1622,16 @@ class CanvasApp {
         const isOnBorder = (y === y1 || y === y2 || x === x1 || x === x2)
         if (!isOnBorder) continue
 
-        const isCorner = (x === x1 && y === y1) || (x === x2 && y === y1) ||
-                         (x === x1 && y === y2) || (x === x2 && y === y2)
-        const isEdgeHandle = (x === midX && y === y1) || (x === midX && y === y2) ||
-                             (x === x1 && y === midY) || (x === x2 && y === midY)
-        const bg = (isCorner || isEdgeHandle) ? this.handleColor : this.selectedColor
+        let bg = this.getSelectionBg(x, y)
+        if (showHandles) {
+          const isCorner = (x === x1 && y === y1) || (x === x2 && y === y1) ||
+                           (x === x1 && y === y2) || (x === x2 && y === y2)
+          const isEdgeHandle = (x === midX && y === y1) || (x === midX && y === y2) ||
+                               (x === x1 && y === midY) || (x === x2 && y === midY)
+          if (isCorner || isEdgeHandle) {
+            bg = this.handleColor
+          }
+        }
 
         const char = this.readBufferChar(buffer, x, y)
         const fg = this.readBufferFg(buffer, x, y)
@@ -1430,7 +1650,185 @@ class CanvasApp {
       const char = this.readBufferChar(buffer, x, y)
       const fg = this.readBufferFg(buffer, x, y)
       const attrs = this.readBufferAttrs(buffer, x, y)
-      buffer.setCell(x, y, char, fg, this.selectedColor, attrs)
+      const bg = this.getSelectionBg(x, y)
+      buffer.setCell(x, y, char, fg, bg, attrs)
+    }
+  }
+
+  private applyStrokeColorToSelection(): void {
+    if (!this.hasSelection()) return
+    
+    this.saveSnapshot()
+    
+    for (const id of this.selectedTextBoxIds) {
+      const box = this.textBoxes.find(b => b.id === id)
+      if (box) {
+        box.strokeColor = this.currentStrokeColor
+        // Also update all characters in the text box
+        for (const char of box.chars) {
+          char.color = this.currentStrokeColor
+        }
+      }
+    }
+    for (const id of this.selectedRectIds) {
+      const rect = this.rectangles.find(r => r.id === id)
+      if (rect) {
+        rect.strokeColor = this.currentStrokeColor
+      }
+    }
+    for (const id of this.selectedLineIds) {
+      const line = this.lines.find(l => l.id === id)
+      if (line) {
+        line.strokeColor = this.currentStrokeColor
+      }
+    }
+  }
+
+  private applyFillColorToSelection(): void {
+    if (!this.hasSelection()) return
+    
+    this.saveSnapshot()
+    
+    for (const id of this.selectedTextBoxIds) {
+      const box = this.textBoxes.find(b => b.id === id)
+      if (box) {
+        box.fillColor = this.currentFillColor
+      }
+    }
+    for (const id of this.selectedRectIds) {
+      const rect = this.rectangles.find(r => r.id === id)
+      if (rect) {
+        rect.fillColor = this.currentFillColor
+      }
+    }
+    // Lines don't use fill color
+  }
+
+  // Returns true if click was handled
+  private handleColorPickerClick(x: number, y: number): boolean {
+    // Color picker is at bottom right, last row of canvas (just above toolbar)
+    const pickerY = this.gridHeight - 1
+    const width = this.gridWidth
+    const pickerWidth = 32
+    const startX = width - pickerWidth
+    
+    if (y !== pickerY || x < startX) {
+      return false
+    }
+    
+    // Calculate positions:
+    // "Stroke: " starts at startX (8 chars)
+    // Stroke colors: startX + 8 to startX + 8 + 5 (6 colors, indices 0-5)
+    // "  " (2 chars)
+    // "Fill: " (6 chars)
+    // Fill colors: startX + 8 + 6 + 2 + 6 = startX + 22 to startX + 22 + 5
+    
+    const strokeColorsStart = startX + 8
+    const strokeColorsEnd = strokeColorsStart + STROKE_PALETTE.length - 1
+    const fillColorsStart = startX + 8 + STROKE_PALETTE.length + 2 + 6
+    const fillColorsEnd = fillColorsStart + FILL_PALETTE.length - 1
+    
+    if (x >= strokeColorsStart && x <= strokeColorsEnd) {
+      const colorIndex = x - strokeColorsStart
+      if (colorIndex >= 0 && colorIndex < STROKE_PALETTE.length) {
+        this.currentStrokeColorIndex = colorIndex
+        this.currentStrokeColor = STROKE_PALETTE[colorIndex] ?? null
+        
+        // Update selected entity's stroke color
+        this.applyStrokeColorToSelection()
+        
+        this.renderer.requestRender()
+        return true
+      }
+    }
+    
+    if (x >= fillColorsStart && x <= fillColorsEnd) {
+      const colorIndex = x - fillColorsStart
+      if (colorIndex >= 0 && colorIndex < FILL_PALETTE.length) {
+        this.currentFillColorIndex = colorIndex
+        this.currentFillColor = FILL_PALETTE[colorIndex] ?? null
+        
+        // Update selected entity's fill color
+        this.applyFillColorToSelection()
+        
+        this.renderer.requestRender()
+        return true
+      }
+    }
+    
+    return false
+  }
+
+  private renderColorPicker(buffer: OptimizedBuffer): void {
+    // Color picker in bottom right, just above toolbar (last row of canvas)
+    // Layout: "Stroke: ■■■■■■  Fill: ■■■■■■"
+    
+    const pickerY = this.gridHeight - 1  // Last row of canvas, right above toolbar
+    const width = buffer.width
+    
+    // Calculate starting X position (right-aligned)
+    // "Stroke: " (8) + 7 colors (7) + "  " (2) + "Fill: " (6) + 7 colors (7) + padding (2) = 32
+    const pickerWidth = 32
+    const startX = width - pickerWidth
+    
+    if (startX < 0 || pickerY < 0) return
+    
+    // Draw background for the color picker area
+    for (let x = startX; x < width; x++) {
+      buffer.setCell(x, pickerY, " ", this.toolbarTextColor, this.toolbarBgColor, 0)
+    }
+    
+    let x = startX
+    
+    const drawText = (text: string, fg: RGBA) => {
+      for (const char of text) {
+        if (x < width) {
+          buffer.setCell(x, pickerY, char, fg, this.toolbarBgColor, 0)
+          x++
+        }
+      }
+    }
+    
+    const drawStrokeSwatch = (colorIndex: number, isSelected: boolean) => {
+      const color = STROKE_PALETTE[colorIndex] ?? null
+      if (x < width) {
+        if (color === null) {
+          const fg = isSelected ? this.toolbarActiveColor : this.toolbarTextColor
+          buffer.setCell(x, pickerY, "∅", fg, this.toolbarBgColor, 0)
+        } else {
+          const char = isSelected ? "█" : "■"
+          buffer.setCell(x, pickerY, char, color, this.toolbarBgColor, 0)
+        }
+        x++
+      }
+    }
+    
+    const drawFillSwatch = (colorIndex: number, isSelected: boolean) => {
+      const color = FILL_PALETTE[colorIndex] ?? null
+      if (x < width) {
+        if (color === null) {
+          const fg = isSelected ? this.toolbarActiveColor : this.toolbarTextColor
+          buffer.setCell(x, pickerY, "∅", fg, this.toolbarBgColor, 0)
+        } else {
+          const char = isSelected ? "█" : "■"
+          buffer.setCell(x, pickerY, char, color, this.toolbarBgColor, 0)
+        }
+        x++
+      }
+    }
+    
+    // Draw stroke section
+    drawText("Stroke: ", this.toolbarTextColor)
+    for (let i = 0; i < STROKE_PALETTE.length; i++) {
+      drawStrokeSwatch(i, i === this.currentStrokeColorIndex)
+    }
+    
+    drawText("  ", this.toolbarTextColor)
+    
+    // Draw fill section
+    drawText("Fill: ", this.toolbarTextColor)
+    for (let i = 0; i < FILL_PALETTE.length; i++) {
+      drawFillSwatch(i, i === this.currentFillColorIndex)
     }
   }
 
@@ -1562,22 +1960,23 @@ class CanvasApp {
         return
       }
 
-      // Delete selected or hovered item
+      // Delete selected or hovered items
       if (key.name === "delete" || key.name === "backspace") {
-        // First check selected items
-        if (this.selectedTextBoxId !== null) {
-          this.deleteTextBox(this.selectedTextBoxId)
-          this.selectedTextBoxId = null
-          return
-        }
-        if (this.selectedRectId !== null) {
-          this.deleteRect(this.selectedRectId)
-          this.selectedRectId = null
-          return
-        }
-        if (this.selectedLineId !== null) {
-          this.deleteLine(this.selectedLineId)
-          this.selectedLineId = null
+        // First check if there are selected items
+        if (this.hasSelection()) {
+          this.saveSnapshot()
+          // Delete all selected items
+          for (const id of this.selectedTextBoxIds) {
+            this.textBoxes = this.textBoxes.filter(b => b.id !== id)
+          }
+          for (const id of this.selectedRectIds) {
+            this.rectangles = this.rectangles.filter(r => r.id !== id)
+          }
+          for (const id of this.selectedLineIds) {
+            this.lines = this.lines.filter(l => l.id !== id)
+          }
+          this.clearSelection()
+          this.renderer.requestRender()
           return
         }
         // Then check hovered items
@@ -1652,7 +2051,7 @@ class CanvasApp {
       const code = key.sequence.charCodeAt(0)
       if (code >= 32 && code <= 126) {
         this.saveSnapshot()
-        const newChar: TextChar = { char: key.sequence, bold: this.boldMode }
+        const newChar: TextChar = { char: key.sequence, bold: this.boldMode, color: this.currentStrokeColor }
         box.chars.splice(this.textCursorPos, 0, newChar)
         this.textCursorPos++
         this.renderer.requestRender()
