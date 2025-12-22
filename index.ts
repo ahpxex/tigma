@@ -1891,10 +1891,6 @@ class CanvasApp {
     // Use strokeColor for the line, fall back to text color
     // Selection highlighting is done separately via renderLineSelectionHighlight
     const strokeColor = line.strokeColor ?? this.textColor
-    let bg = this.bgColor
-    if (isHovered) {
-      bg = this.hoverColor
-    }
     const attrs = line.bold ? TextAttributes.BOLD : 0
 
     const points = this.getLinePoints(line.x1, line.y1, line.x2, line.y2)
@@ -1902,6 +1898,12 @@ class CanvasApp {
     for (let i = 0; i < points.length; i++) {
       const { x, y } = points[i]!
       if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
+
+      // Lines always preserve the existing background color
+      let bg = this.readBufferBg(buffer, x, y)
+      if (isHovered) {
+        bg = this.hoverColor
+      }
 
       const char = this.getLineChar(line.x1, line.y1, line.x2, line.y2, i, points.length)
       buffer.setCell(x, y, char, strokeColor, bg, attrs)
@@ -1918,8 +1920,10 @@ class CanvasApp {
       const { x, y } = points[i]!
       if (x < 0 || x >= this.gridWidth || y < 0 || y >= this.gridHeight) continue
 
+      // Line preview preserves existing background
+      const bg = this.readBufferBg(buffer, x, y)
       const char = this.getLineChar(this.drawStartX, this.drawStartY, this.drawCursorX, this.drawCursorY, i, points.length)
-      buffer.setCell(x, y, char, fg, this.bgColor, attrs)
+      buffer.setCell(x, y, char, fg, bg, attrs)
     }
   }
 
